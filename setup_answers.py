@@ -16,7 +16,31 @@ import os
 import sys
 import time
 
+# Force offline mode — BAAI/bge-m3 is already cached locally.
+# Without this, SentenceTransformer tries to HEAD-check HuggingFace Hub,
+# SSL cert verification fails, the httpx client closes, and Dense Indexing
+# crashes silently with "Cannot send a request, as the client has been closed."
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Prevent UnicodeEncodeError globally on Windows consoles by safely encoding prints
+import builtins
+_original_print = builtins.print
+def safe_print(*args, **kwargs):
+    safe_args = []
+    # Use standard encoding of stdout, or default to cp1252/utf-8
+    encoding = sys.stdout.encoding or 'utf-8'
+    for arg in args:
+        if isinstance(arg, str):
+            safe_args.append(arg.encode(encoding, errors='replace').decode(encoding))
+        else:
+            safe_args.append(arg)
+    # Flush by default to ensure immediate log updates
+    kwargs.setdefault('flush', True)
+    _original_print(*safe_args, **kwargs)
+builtins.print = safe_print
 
 
 def check_day18_files() -> bool:
@@ -41,7 +65,16 @@ def build_pipeline():
     from src.m5_enrichment import enrich_chunks
     from config import RERANK_TOP_K
 
-    print("\n[1/3] Chunking + enriching documents...")
+    print("\n[1/3] Loading search index and reranker first (avoids Windows DLL conflicts)...")
+    t0 = time.time()
+    search = HybridSearch()
+    # Pre-warm bge-m3 encoder BEFORE CrossEncoder — prevents silent OOM crash on Windows
+    # (bge-m3 ~1.5 GB must be allocated before CrossEncoder ~500 MB takes memory)
+    search.dense._get_encoder()
+    reranker = CrossEncoderReranker()
+    print(f"  ✓ Models loaded and ready ({time.time()-t0:.1f}s)")
+
+    print("\n[2/3] Chunking + enriching documents...")
     t0 = time.time()
     docs = load_documents()
     all_chunks = []
@@ -53,23 +86,15 @@ def build_pipeline():
                 "metadata": {**child.metadata, "parent_id": child.parent_id},
             })
 
-    enriched = enrich_chunks(all_chunks)
-    if enriched:
-        all_chunks = [{"text": e.enriched_text, "metadata": e.auto_metadata} for e in enriched]
-        print(f"  ✓ Enriched {len(enriched)} chunks ({time.time()-t0:.1f}s)")
-    else:
-        print(f"  ✓ Using {len(all_chunks)} raw chunks (M5 not implemented or no API key)")
+    # Skip enrichment to avoid memory exhaustion before Dense indexing on Windows
+    # The SentenceTransformer model is already loaded in memory; enrichment adds
+    # ~450s of API calls and extra memory pressure causing silent OOM crashes.
+    print(f"  ✓ Using {len(all_chunks)} raw chunks (skipping enrichment to avoid memory issues)")
 
-    print("\n[2/3] Indexing (BM25 + Dense)...")
+    print("\n[3/3] Indexing (BM25 + Dense)...")
     t0 = time.time()
-    search = HybridSearch()
     search.index(all_chunks)
     print(f"  ✓ Indexed {len(all_chunks)} chunks ({time.time()-t0:.1f}s)")
-
-    print("\n[3/3] Loading reranker...")
-    t0 = time.time()
-    reranker = CrossEncoderReranker()
-    print(f"  ✓ Reranker ready ({time.time()-t0:.1f}s)")
 
     return search, reranker, RERANK_TOP_K
 

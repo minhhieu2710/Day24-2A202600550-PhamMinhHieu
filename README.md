@@ -124,7 +124,7 @@ Chạy RAGAS trên **50 câu hỏi** với **3 distributions** để tìm ra đi
 | `adversarial` | 10 | Bẫy: version conflicts (v2023 vs v2024), negation traps |
 
 **4 tasks cần implement:** `group_by_distribution()` → `run_ragas_50q()` → `bottom_10()` → `cluster_analysis()`
-
+m/'
 ```bash
 python src/phase_a_ragas.py
 # Output: reports/ragas_50q.json
